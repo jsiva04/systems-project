@@ -2,7 +2,9 @@
 
 ## Overview
 
-A samurai standoff arcade game for the DFRobot DFRduino Uno with a 16x2 LCD. Two samurai face off each round. After a random delay, a cue ("ATK!" or "BLK!") flashes on screen. You must press the correct button before the timer runs out. Wrong button or too slow means death. Difficulty increases every round. Survive as long as you can and set a high score.
+A samurai standoff arcade game for the DFRobot DFRduino Uno with a 16×2 LCD. Two full-height samurai sprites face off across the screen. After a random delay, the enemy changes pose — a **LUNGE** means you must **BLOCK**; a **GUARD** means you must **ATTACK**. React to the visual cue before the timer runs out. Wrong button or too slow means death. Difficulty increases every round.
+
+There are no text cues ("ATK!" / "BLK!") in the game. You read the enemy's body language and respond. The enemy's idle, attack, and guard poses are all distinct 10×5 pixel sprites occupying both LCD rows.
 
 ---
 
@@ -125,6 +127,47 @@ Download from [https://www.arduino.cc/en/software/](https://www.arduino.cc/en/so
 
 ---
 
+## Sprite System
+
+The HD44780 controller used by the LCD supports exactly 8 user-defined custom characters (slots 0–7), each 5×8 pixels. The game uses all 8 slots to build two full-height samurai sprites: one for the player (always on the left, at column 0) and one for the enemy (always on the right, at column 15). Each sprite is composed of a top half (row 0) and a bottom half (row 1), giving an effective 5×16 pixel figure.
+
+### Slot Allocation
+
+| Slot | Name | Description |
+|------|------|-------------|
+| 0 | `CHAR_PLAYER_TOP` | Player upper body — facing right, sword extended |
+| 1 | `CHAR_PLAYER_BOT` | Player lower body — wide stance |
+| 2 | `CHAR_ENEMY_IDLE_T` | Enemy upper body — neutral standoff pose |
+| 3 | `CHAR_ENEMY_IDLE_B` | Enemy lower body — neutral standoff pose |
+| 4 | `CHAR_ENEMY_ATK_T` | Enemy upper body — **LUNGE** (head far left, sword fully extended) |
+| 5 | `CHAR_ENEMY_ATK_B` | Enemy lower body — front foot forward, lunge stance |
+| 6 | `CHAR_ENEMY_BLK_T` | Enemy upper body — **GUARD** (arms raised wide, sword horizontal) |
+| 7 | `CHAR_ENEMY_BLK_B` | Enemy lower body — wide planted defensive stance |
+
+### Pixel Layout
+
+All 8 characters are loaded into CGRAM once in `setup()` and never modified at runtime. The three enemy states are visually distinct:
+
+- **IDLE** — symmetric facing-left mirror of the player. Sword tip points left at neutral height (row 3: `11101`).
+- **ATTACK LUNGE** — head leaning hard left (`11000`), arm and sword fully extended across all 5 pixels (row 3: `11111`). Bottom half has front leg lunging toward the player.
+- **GUARD** — head at normal height, but row 2 shows `11111` (arms spread wide, sword held horizontal as a guard). Bottom half has an extra-wide planted stance (`10001` knee spread vs `01010` idle).
+
+### Screen Layout
+
+```
+Col:  0    1 2 3 4 5 6 7 8 9 10 11 12 13 14  15
+Row0: [P_top]  [      empty stage       ]   [E_top]
+Row1: [P_bot]  [R:X  +  spaces         ]   [E_bot]
+```
+
+The `R:X` label (round number) is the only text shown during active gameplay. Everything else is sprites or blank space.
+
+### Cue Delivery
+
+`action_show_cue()` updates **only column 15** — it does not call `lcd.clear()`. The standoff scene remains on screen, and the enemy sprite snaps from idle to either the attack or guard pose in a single frame. This gives a clean, instant visual trigger with no LCD flicker.
+
+---
+
 ## Finite State Machine Design
 
 The game uses the **Garbini FSM method** with a state transition action table. Each entry in the table is a struct: `{current_state, event, action_function, next_state}`.
@@ -133,12 +176,12 @@ The game uses the **Garbini FSM method** with a state transition action table. E
 
 | State | Description |
 |-------|-------------|
-| TITLE_SCREEN | Shows game title. Press any button to start. |
-| STANDOFF | Two samurai face each other. Random delay counting down. |
-| CUE_SHOWN | "ATK!" or "BLK!" cue displayed. Reaction window counting down. |
-| ROUND_WIN | Player pressed the correct button. Brief victory message. |
-| PLAYER_DEAD | Wrong button, too slow, or premature press. LEDs flash. |
-| GAME_OVER | Final score displayed. Press any button to restart. |
+| TITLE_SCREEN | Full-height samurai face off. "SAMURAI / STANDOFF!" displayed. Press any button to start. |
+| STANDOFF | Sprites visible, enemy in idle pose. Round number shown. Random delay counting down. |
+| CUE_SHOWN | Enemy sprite snaps to ATTACK or GUARD pose. Reaction window counting down. |
+| ROUND_WIN | Player pressed the correct button. Player sprite remains; enemy column goes blank. |
+| PLAYER_DEAD | Wrong button, too slow, or premature press. Enemy sprite stays (victorious). LEDs flash. |
+| GAME_OVER | High score displayed. Press any button to restart. |
 
 ### Events
 
@@ -152,35 +195,44 @@ The game uses the **Garbini FSM method** with a state transition action table. E
 | EVENT_TIMER_DISPLAY | Timer1 ISR decremented display timer to zero |
 | EVENT_TIMER_FLASH | Timer2 ISR ticked for LED flash toggle |
 
+### Cue Logic
+
+```
+player_must_attack = true   →  enemy shows GUARD pose   →  press ATK to survive
+player_must_attack = false  →  enemy shows ATTACK pose  →  press BLK to survive
+```
+
+This maps naturally to a fighting game: if the enemy is guarding, you break through with an attack; if the enemy is lunging at you, you block. There is no on-screen text prompt — you read the sprite.
+
 ### State Transition Diagram
 
 ```
                     ┌──────────────┐
          any btn    │ TITLE_SCREEN │
-        ┌──────────►│  "SAMURAI    │
-        │           │  STANDOFF!"  │
+        ┌──────────►│  full-height │
+        │           │  standoff    │
         │           └──────┬───────┘
         │                  │ any button press
         │                  ▼
         │           ┌──────────────┐◄─── display timer
         │           │   STANDOFF   │     expired
-        │           │  (random     │        │
-        │           │   delay)     │        │
+        │           │ (enemy idle) │        │
         │           └──┬───┬───────┘  ┌─────┴──────┐
         │    premature │   │ delay    │ ROUND_WIN  │
-        │    press     │   │ expired  │ "VICTORY!" │
-        │              │   ▼         └─────────────┘
+        │    press     │   │ expired  │ player on  │
+        │              │   ▼         │ left only  │
         │              │ ┌──────────────┐     ▲
         │              │ │  CUE_SHOWN   │     │
-        │              │ │ "ATK!"/"BLK!"│     │ correct
-        │              │ └──┬───┬───────┘     │ button
+        │              │ │ enemy snaps  │     │ correct
+        │              │ │ to ATK/BLK  │     │ button
+        │              │ └──┬───┬───────┘     │
         │              │    │   │ correct ────┘
         │              │    │   │
         │    timeout   │    │   │ wrong button
         │    or wrong  ▼    ▼   │
         │           ┌──────────────┐
         │           │ PLAYER_DEAD  │
-        │           │ "YOU DIED"   │
+        │           │ enemy stays  │
         │           │ (LED flash)  │
         │           └──────┬───────┘
         │                  │ display timer expired
@@ -211,74 +263,80 @@ The game uses the **Garbini FSM method** with a state transition action table. E
 ### Test 1 — Power-On and LCD Check
 
 1. Plug in the USB cable.
-2. **Expected:** The LCD backlight turns orange and displays:
-   - Line 1: `♦ SAMURAI    ♦` (with custom samurai characters on each end)
-   - Line 2: `♦ STANDOFF!  ♦` (with custom katana characters)
+2. **Expected:** The LCD displays two full-height samurai sprites facing each other. Player sprite on the far left (column 0), enemy sprite on the far right (column 15).
+   - Line 1: `[player_top]   SAMURAI    [enemy_idle_top]`
+   - Line 2: `[player_bot]  STANDOFF!   [enemy_idle_bot]`
 3. Both red LEDs should be **OFF**.
 
 ### Test 2 — Starting the Game
 
 1. Press either the ATK or BLK button.
-2. **Expected:** LCD changes to blue backlight showing:
-   - Line 1: `♦♦  ......  ♦♦` (samurai and katanas facing each other)
-   - Line 2: `Round 1  READY`
-3. Do **not** press any buttons yet. Wait for the cue.
+2. **Expected:** LCD shows the standoff scene.
+   - Line 1: `[player_top]              [enemy_idle_top]`
+   - Line 2: `[player_bot]  R:1         [enemy_idle_bot]`
+3. The enemy sprite should be in the neutral/idle pose. Do **not** press any buttons yet. Wait for the cue.
 
-### Test 3 — Cue Appears and Correct Response
+### Test 3 — Visual Cue and Correct Response
 
-1. Wait 1–3.5 seconds. A cue will appear with a red backlight.
-2. **If "ATK!" appears:** press the ATK button (pin 2).
-3. **If "BLK!" appears:** press the BLK button (pin 3).
-4. **Expected:** LCD turns green and shows:
-   - Line 1: `♦♦ VICTORY! ♦♦`
-   - Line 2: `Defeated: 1`
-5. After ~1.2 seconds, it automatically advances to round 2 with a new standoff.
+1. Wait 1–3.5 seconds. Only column 15 will change — the enemy sprite snaps to a new pose.
+2. **If enemy shows LUNGE (head far left, full arm extension):** Press BLK.
+3. **If enemy shows GUARD (arms raised wide across full width):** Press ATK.
+4. **Expected:** LCD shows victory.
+   - Line 1: `[player_top]   VICTORY!   ` (column 15 is blank — enemy defeated)
+   - Line 2: `[player_bot]   Kills: 1   `
+5. After ~1.2 seconds, the game advances to round 2.
 
 ### Test 4 — Wrong Button Press (Death)
 
 1. Start a new round and wait for the cue.
-2. Deliberately press the **wrong** button (ATK when it says BLK, or vice versa).
+2. Deliberately press the **wrong** button (BLK when enemy guards, ATK when enemy lunges).
 3. **Expected:**
-   - LCD turns red: `☠ YOU DIED ☠` with your score
-   - Both red LEDs **flash rapidly** (~10 Hz) for about 2.5 seconds
-4. After the flash, LCD shows dark red `GAME OVER` with your high score.
+   - Line 1: ` YOU DIED     [enemy_top]` (enemy sprite persists, player column is blank)
+   - Line 2: ` Sc:0  Hi:0   [enemy_bot]`
+   - Both red LEDs **flash rapidly** (~10 Hz) for ~2.5 seconds.
+4. After the flash, the GAME_OVER screen appears.
 
 ### Test 5 — Timeout Death (Too Slow)
 
 1. Start a new game and wait for the cue.
 2. Do **not** press any button. Let the reaction window expire (~1.2 seconds for round 1).
-3. **Expected:** Same death sequence as Test 4 — LEDs flash, "YOU DIED", then "GAME OVER".
+3. **Expected:** Same death sequence as Test 4.
 
 ### Test 6 — Premature Press (Dishonourable Death)
 
-1. Start a new game. During the standoff phase (samurai facing each other, before any cue appears), press either button.
-2. **Expected:** Immediate death — "YOU DIED", LED flash, then "GAME OVER". Pressing before the cue is a dishonourable move.
+1. Start a new game. During the standoff (before the enemy changes pose), press either button.
+2. **Expected:** Immediate death. The enemy is still in idle pose on the death screen — you attacked without honour.
 
-### Test 7 — Difficulty Scaling
+### Test 7 — Cue Distinction Check
+
+1. Play several rounds and pay attention to the enemy pose change.
+2. **LUNGE cue** — head shifts hard left (was centered-left, now at far-left pixels), and a solid horizontal line appears across the full width of the character cell.
+3. **GUARD cue** — head stays at the same position, but a wide horizontal bar appears at the TOP of the character cell (row 2 = both arms raised), and the bottom half shows feet spread significantly wider than idle.
+4. Verify these look meaningfully different to you at a glance.
+
+### Test 8 — Difficulty Scaling
 
 1. Play through several rounds successfully.
-2. **Notice:** The reaction window gets shorter each round. By round 5, you'll feel the pressure. By round 10+, you need very fast reflexes (~350 ms).
+2. **Notice:** The reaction window gets shorter each round. By round 5, the pressure is noticeable. By round 10+, you need very fast reflexes (~350 ms).
 3. Verify the game does not freeze or glitch after many rounds.
 
-### Test 8 — High Score Persistence
+### Test 9 — High Score Persistence
 
 1. Play a game and get a score (e.g., 5 kills).
-2. Die and go to GAME_OVER. Note the high score.
-3. Press a button to restart. Play again.
-4. Die with a lower score (e.g., 2 kills).
-5. **Expected:** GAME_OVER screen still shows your original high score of 5, not 2.
-6. Play again and beat 5 kills.
-7. **Expected:** High score updates to the new record.
+2. Die and note the high score on the GAME_OVER screen.
+3. Press a button to restart. Play again and die with a lower score.
+4. **Expected:** GAME_OVER still shows your original high score.
+5. Play again and beat 5 kills. **Expected:** High score updates.
 
-### Test 9 — Rapid Button Mashing
+### Test 10 — Rapid Button Mashing
 
 1. During any phase, rapidly press both buttons.
-2. **Expected:** The game should not crash, freeze, or display garbage. Debouncing (50 ms in ISRs) prevents false triggers.
+2. **Expected:** No crash, freeze, or garbled sprites. Debouncing (50 ms) prevents false triggers.
 
-### Test 10 — Full Playthrough
+### Test 11 — Full Playthrough
 
 1. Play at least 10 consecutive rounds to confirm stability.
-2. Verify the LCD updates correctly every round, LEDs work on death, and the game restarts cleanly from GAME_OVER.
+2. Verify sprites update correctly every round, LEDs work on death, and the game restarts cleanly from GAME_OVER.
 
 ---
 
@@ -286,11 +344,13 @@ The game uses the **Garbini FSM method** with a state transition action table. E
 
 | Symptom | Likely Cause | Fix |
 |---------|-------------|-----|
-| LCD is blank / no backlight | Wrong I2C address or wiring | Check SDA→A4, SCL→A5, try address 0x60 instead of 0x6B |
+| LCD blank / no backlight | Wrong I2C address or wiring | Check SDA→A4, SCL→A5, try address 0x60 instead of 0x6B |
 | LCD shows garbage characters | Loose I2C wires | Reseat SDA and SCL connections |
+| Sprites look wrong / corrupted | CGRAM write error | Power cycle the board; `lcd.customSymbol()` calls run once in `setup()` |
 | Button presses not detected | Button wired wrong | Ensure button straddles the breadboard gap; test with a multimeter |
 | LEDs don't flash on death | Reversed polarity | Long leg (anode) toward the resistor, short leg to GND |
-| LEDs always on | Pin 13 onboard LED conflict | Normal for pin 13 — the onboard LED mirrors it |
-| Game skips standoff (instant cue) | Random seed issue | Ensure A0 is floating (not connected to anything) for `randomSeed()` |
+| Enemy doesn't change pose | `action_show_cue()` not firing | Verify standoff delay countdown is working; check Timer1 setup |
+| Cue looks like the idle pose | Custom chars loaded in wrong slots | Confirm slot assignments match `#define` values in the sketch |
+| Game skips standoff (instant cue) | Random seed issue | Ensure A0 is floating (not connected) for `randomSeed()` |
 | "YOU DIED" immediately on start | Noisy button bounce | Check button wiring; increase debounce time in ISR if needed |
 | Compile error: library not found | Missing DFRobot library | Install DFRobot_RGBLCD1602 via Library Manager |
