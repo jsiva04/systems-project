@@ -746,19 +746,26 @@ ISR(TIMER2_COMPA_vect) {
 }
 
 // External interrupt — Flip button A (pin 2, INT0)
-// 50 ms debounce via timestamp comparison.
+// 50 ms debounce via timestamp comparison. Only set flip_pressed if enough
+// time has passed AND the button is still LOW (pressed). This prevents false
+// triggers from noise or bounce.
 void isr_flip_a(void) {
   static unsigned long last_time = 0;
   unsigned long now = millis();
-  if (now - last_time > 50) flip_pressed = true;
-  last_time = now;
+  if (now - last_time > 100 && digitalRead(FLIP_BTN_A) == LOW) {
+    flip_pressed = true;
+    last_time = now;
+  }
 }
 
 // External interrupt — Flip button B (pin 3, INT1)
 // Both buttons set the same flag — either one flips gravity.
+// Only set flip_pressed if enough time has passed AND the button is still LOW.
 void isr_flip_b(void) {
   static unsigned long last_time = 0;
   unsigned long now = millis();
-  if (now - last_time > 50) flip_pressed = true;
-  last_time = now;
+  if (now - last_time > 100 && digitalRead(FLIP_BTN_B) == LOW) {
+    flip_pressed = true;
+    last_time = now;
+  }
 }
